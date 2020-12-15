@@ -17,14 +17,31 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
+
+type Identity int
+
+const (
+	follower  Identity = 0
+	candidate Identity = 1
+	leader    Identity = 2
+)
+
+func getTimeout() time.Duration {
+	rand.Seed(time.Now().UnixNano())
+	return time.Duration((rand.Intn(150) + 150)) * time.Millisecond
+}
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -43,30 +60,43 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type LogEntry struct {
+	LogIndex int
+	Term     int
+	LogItem  interface{}
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu             sync.Mutex          // Lock to protect shared access to this peer's state
+	peers          []*labrpc.ClientEnd // RPC end points of all peers
+	persister      *Persister          // Object to hold this peer's persisted state
+	me             int                 // this peer's index into peers[]
+	term           int
+	dead           int32 // set by Kill()
+	leaderId       int
+	voteFor        int
+	identity       Identity
+	committedIndex int
+	lastApplied    int
+	log            []LogEntry
+	nextIndex      []int
+	matchIndex     []int
+	electionTimer  *time.Timer
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	return rf.term, rf.identity == leader
 }
 
 //
@@ -84,7 +114,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -108,15 +137,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -125,6 +155,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -164,10 +196,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	fmt.Printf("%v", args)
+	args.Term = rf.term
+	args.CandidateId = rf.me
+	args.LastLogTerm = rf.log[rf.lastApplied].Term
+	args.LastLogIndex = rf.lastApplied
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
-
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -189,7 +225,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -215,6 +250,21 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) campaign() {
+
+}
+
+func (rf *Raft) startLoop() {
+	for {
+		select {
+		case <-rf.electionTimer.C:
+			rf.campaign()
+		}
+
+	}
+
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -232,12 +282,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.voteFor = -1
+	rf.log = []LogEntry{{0, 0, nil}}
+	rf.committedIndex = 0
+	rf.lastApplied = 0
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.identity = follower
+	rf.electionTimer = time.NewTimer(getTimeout())
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
-
+	go rf.startLoop()
 	return rf
 }
